@@ -110,6 +110,103 @@
 #include "utils/typcache.h"
 #include "utils/usercontext.h"
 
+/* Structure to hold DROP TABLE information for commit-time logging */
+typedef struct DropTableInfo
+{
+	Oid			reloid;
+	char		relname[NAMEDATALEN];
+	XLogRecPtr	drop_lsn;		/* LSN at time of drop operation */
+	struct DropTableInfo *next;
+} DropTableInfo;
+
+/* Per-transaction list of dropped tables */
+static DropTableInfo *pending_drop_tables = NULL;
+static bool drop_table_callback_registered = false;
+
+/* Forward declaration */
+static void DropTableXactCallback(XactEvent event, void *arg);
+
+/* Register DROP TABLE for commit-time logging */
+static void
+RegisterDropTable(Oid reloid, const char *relname, XLogRecPtr lsn)
+{
+	DropTableInfo *info;
+	MemoryContext oldcontext;
+
+	/* Register callback once per backend lifetime */
+	if (!drop_table_callback_registered)
+	{
+		RegisterXactCallback(DropTableXactCallback, NULL);
+		drop_table_callback_registered = true;
+	}
+
+	/* Allocate in transaction context - will be cleaned up automatically */
+	oldcontext = MemoryContextSwitchTo(TopTransactionContext);
+
+	info = (DropTableInfo *) palloc(sizeof(DropTableInfo));
+	info->reloid = reloid;
+	strlcpy(info->relname, relname, NAMEDATALEN);
+	info->drop_lsn = lsn;
+	info->next = pending_drop_tables;
+	pending_drop_tables = info;
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/* Transaction callback to log commit LSN for DROP TABLE operations */
+static void
+DropTableXactCallback(XactEvent event, void *arg)
+{
+	DropTableInfo *info;
+
+	if (event == XACT_EVENT_PRE_COMMIT && pending_drop_tables != NULL)
+	{
+		/*
+		 * Log all DROP TABLE operations that happened in this transaction.
+		 * At PRE_COMMIT time, we can get a reliable commit LSN.
+		 */
+		XLogRecPtr commit_lsn = GetXLogInsertRecPtr();
+
+		for (info = pending_drop_tables; info != NULL; info = info->next)
+		{
+			ereport(LOG,
+					(errmsg("DROP TABLE committed: relation \"%s\" (OID %u), "
+							"drop LSN: %X/%X, commit LSN: %X/%X",
+							info->relname,
+							info->reloid,
+							LSN_FORMAT_ARGS(info->drop_lsn),
+							LSN_FORMAT_ARGS(commit_lsn))));
+		}
+	}
+	else if (event == XACT_EVENT_COMMIT ||
+			 event == XACT_EVENT_ABORT ||
+			 event == XACT_EVENT_PARALLEL_ABORT)
+	{
+		/* Clean up the list (memory freed automatically via TopTransactionContext) */
+		pending_drop_tables = NULL;
+	}
+}
+
+/* Helper to log DROP TABLE immediately for auto-commit cases */
+static void
+LogDropTableImmediate(Oid reloid, const char *relname)
+{
+	XLogRecPtr lsn = GetXLogInsertRecPtr();
+
+	if (IsTransactionBlock())
+	{
+		/* Inside explicit transaction - register for commit-time logging */
+		RegisterDropTable(reloid, relname, lsn);
+	}
+	else
+	{
+		/* Auto-commit mode - log immediately with commit LSN */
+		ereport(LOG,
+				(errmsg("DROP TABLE: relation \"%s\" (OID %u), LSN: %X/%X",
+						relname, reloid, LSN_FORMAT_ARGS(lsn))));
+	}
+}
+
 /*
  * ON COMMIT action list
  */
@@ -1675,6 +1772,12 @@ RemoveRelations(DropStmt *drop)
 		obj.objectSubId = 0;
 
 		add_exact_object_address(&obj, objects);
+
+		/* Register DROP TABLE for logging */
+		if (drop->removeType == OBJECT_TABLE)
+		{
+			LogDropTableImmediate(relOid, rel->relname);
+		}
 	}
 
 	performMultipleDeletions(objects, drop->behavior, flags);

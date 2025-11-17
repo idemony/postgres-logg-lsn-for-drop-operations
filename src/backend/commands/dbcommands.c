@@ -29,6 +29,7 @@
 #include "access/multixact.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "access/xloginsert.h"
 #include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
@@ -1858,6 +1859,13 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	 * dirty buffer to the dead database later...
 	 */
 	DropDatabaseBuffers(db_id);
+
+	/* Log LSN after database drop operation completes */
+	{
+		XLogRecPtr current_lsn = GetXLogInsertRecPtr();
+		elog(LOG, "DROP DATABASE: database \"%s\", OID %u, LSN: %X/%X",
+			 dbname, db_id, LSN_FORMAT_ARGS(current_lsn));
+	}
 
 	/*
 	 * Tell checkpointer to forget any pending fsync and unlink requests for
