@@ -18,6 +18,7 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "catalog/catalog.h"
 #include "catalog/dependency.h"
 #include "catalog/heap.h"
@@ -176,6 +177,107 @@ static bool stack_address_present_add_flags(const ObjectAddress *object,
 											ObjectAddressStack *stack);
 static void DeleteInitPrivs(const ObjectAddress *object);
 
+/* Structure to hold DROP TABLE information for commit-time logging */
+typedef struct DropTableInfo
+{
+	Oid			reloid;
+	char		relname[NAMEDATALEN];
+	char		schemaname[NAMEDATALEN];
+	XLogRecPtr	drop_lsn;
+	bool		is_cascade;		/* True if dropped via CASCADE */
+	struct DropTableInfo *next;
+} DropTableInfo;
+
+/* Per-transaction list of dropped tables */
+static DropTableInfo *pending_drop_tables = NULL;
+static bool drop_table_callback_registered = false;
+
+/* Forward declarations */
+static void DropTableXactCallback(XactEvent event, void *arg);
+static void RegisterDropTable(Oid reloid, const char *relname,
+							  const char *schemaname, XLogRecPtr lsn,
+							  bool is_cascade);
+
+/*
+ * Register a table drop for commit-time logging.
+ */
+static void
+RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
+				  XLogRecPtr lsn, bool is_cascade)
+{
+	DropTableInfo *info;
+	MemoryContext oldcontext;
+
+	/* Register callback once per backend lifetime */
+	if (!drop_table_callback_registered)
+	{
+		RegisterXactCallback(DropTableXactCallback, NULL);
+		drop_table_callback_registered = true;
+	}
+
+	/* Allocate in transaction context */
+	oldcontext = MemoryContextSwitchTo(TopTransactionContext);
+
+	info = (DropTableInfo *) palloc(sizeof(DropTableInfo));
+	info->reloid = reloid;
+	strlcpy(info->relname, relname, NAMEDATALEN);
+	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
+	info->drop_lsn = lsn;
+	info->is_cascade = is_cascade;
+	info->next = pending_drop_tables;
+	pending_drop_tables = info;
+
+	MemoryContextSwitchTo(oldcontext);
+}
+
+/*
+ * DropTableXactCallback
+ *
+ * Transaction callback to log commit LSN for DROP TABLE operations.
+ */
+static void
+DropTableXactCallback(XactEvent event, void *arg)
+{
+	DropTableInfo *info;
+
+	if (event == XACT_EVENT_PRE_COMMIT && pending_drop_tables != NULL)
+	{
+		XLogRecPtr commit_lsn = GetXLogInsertRecPtr();
+
+		for (info = pending_drop_tables; info != NULL; info = info->next)
+		{
+			if (info->is_cascade)
+			{
+				ereport(LOG,
+						(errmsg("DROP TABLE (CASCADE): relation \"%s.%s\" (OID %u), "
+								"drop LSN: %X/%X, commit LSN: %X/%X",
+								info->schemaname,
+								info->relname,
+								info->reloid,
+								LSN_FORMAT_ARGS(info->drop_lsn),
+								LSN_FORMAT_ARGS(commit_lsn))));
+			}
+			else
+			{
+				ereport(LOG,
+						(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), "
+								"drop LSN: %X/%X, commit LSN: %X/%X",
+								info->schemaname,
+								info->relname,
+								info->reloid,
+								LSN_FORMAT_ARGS(info->drop_lsn),
+								LSN_FORMAT_ARGS(commit_lsn))));
+			}
+		}
+	}
+
+	if (event == XACT_EVENT_COMMIT ||
+		event == XACT_EVENT_ABORT ||
+		event == XACT_EVENT_PARALLEL_ABORT)
+	{
+		pending_drop_tables = NULL;
+	}
+}
 
 /*
  * Go through the objects given running the final actions on them, and execute
@@ -1356,6 +1458,66 @@ doDeletion(const ObjectAddress *object, int flags)
 		case RelationRelationId:
 			{
 				char		relKind = get_rel_relkind(object->objectId);
+
+				/*
+				* Log all table drops that go through this function.
+				* This catches:
+				* - Direct DROP TABLE
+				* - DROP SCHEMA CASCADE
+				* - DROP TABLE parent CASCADE (FK dependencies)
+				* - Any other cascade deletions
+				*/
+				if (relKind == RELKIND_RELATION ||
+					relKind == RELKIND_PARTITIONED_TABLE)
+				{
+					char *relname = get_rel_name(object->objectId);
+					Oid schemaoid = get_rel_namespace(object->objectId);
+					char *schemaname = get_namespace_name(schemaoid);
+					XLogRecPtr lsn = GetXLogInsertRecPtr();
+					bool is_cascade;
+
+					/*
+					* Determine if this is a CASCADE drop.
+					* If PERFORM_DELETION_INTERNAL is set, it's part of dependency
+					* resolution (CASCADE). Otherwise, it's a direct DROP.
+					*/
+					is_cascade = (flags & PERFORM_DELETION_INTERNAL) != 0;
+
+					if (relname != NULL)
+					{
+						if (IsTransactionBlock())
+						{
+							/* Register for commit-time logging */
+							RegisterDropTable(object->objectId, relname,
+											schemaname ? schemaname : "unknown",
+											lsn, is_cascade);
+						}
+						else
+						{
+							/* Auto-commit - log immediately */
+							if (is_cascade)
+							{
+								ereport(LOG,
+										(errmsg("DROP TABLE (CASCADE): relation \"%s.%s\" (OID %u), LSN: %X/%X",
+												schemaname ? schemaname : "unknown",
+												relname, object->objectId,
+												LSN_FORMAT_ARGS(lsn))));
+							}
+							else
+							{
+								ereport(LOG,
+										(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
+												schemaname ? schemaname : "unknown",
+												relname, object->objectId,
+												LSN_FORMAT_ARGS(lsn))));
+							}
+						}
+
+						pfree(relname);
+						if (schemaname)
+							pfree(schemaname);
+					}
+				}
 
 				if (relKind == RELKIND_INDEX ||
 					relKind == RELKIND_PARTITIONED_INDEX)
