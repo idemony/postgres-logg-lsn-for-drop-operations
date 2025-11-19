@@ -177,45 +177,37 @@ static bool stack_address_present_add_flags(const ObjectAddress *object,
 											ObjectAddressStack *stack);
 static void DeleteInitPrivs(const ObjectAddress *object);
 
-/* Structure to hold DROP TABLE information for commit-time logging */
+/* Structure to hold DROP TABLE information */
 typedef struct DropTableInfo
 {
 	Oid			reloid;
 	char		relname[NAMEDATALEN];
 	char		schemaname[NAMEDATALEN];
 	XLogRecPtr	drop_lsn;
-	bool		is_cascade;		/* True if dropped via CASCADE */
-	struct DropTableInfo *next;
 } DropTableInfo;
 
 /* Per-transaction list of dropped tables */
-static DropTableInfo *pending_drop_tables = NULL;
+static List *pending_drop_tables = NIL;
 static bool drop_table_callback_registered = false;
 
-/* Forward declarations */
 static void DropTableXactCallback(XactEvent event, void *arg);
-static void RegisterDropTable(Oid reloid, const char *relname,
-							  const char *schemaname, XLogRecPtr lsn,
-							  bool is_cascade);
 
 /*
- * Register a table drop for commit-time logging.
+ * Register a table drop for logging lsn.
  */
 static void
 RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
-				  XLogRecPtr lsn, bool is_cascade)
+				  XLogRecPtr lsn)
 {
 	DropTableInfo *info;
 	MemoryContext oldcontext;
 
-	/* Register callback once per backend lifetime */
 	if (!drop_table_callback_registered)
 	{
 		RegisterXactCallback(DropTableXactCallback, NULL);
 		drop_table_callback_registered = true;
 	}
 
-	/* Allocate in transaction context */
 	oldcontext = MemoryContextSwitchTo(TopTransactionContext);
 
 	info = (DropTableInfo *) palloc(sizeof(DropTableInfo));
@@ -223,9 +215,8 @@ RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
 	strlcpy(info->relname, relname, NAMEDATALEN);
 	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
 	info->drop_lsn = lsn;
-	info->is_cascade = is_cascade;
-	info->next = pending_drop_tables;
-	pending_drop_tables = info;
+
+	pending_drop_tables = lappend(pending_drop_tables, info);
 
 	MemoryContextSwitchTo(oldcontext);
 }
@@ -238,45 +229,34 @@ RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
 static void
 DropTableXactCallback(XactEvent event, void *arg)
 {
-	DropTableInfo *info;
+	ListCell *lc;
 
-	if (event == XACT_EVENT_PRE_COMMIT && pending_drop_tables != NULL)
+	if (event == XACT_EVENT_PRE_COMMIT && pending_drop_tables != NIL)
 	{
 		XLogRecPtr commit_lsn = GetXLogInsertRecPtr();
 
-		for (info = pending_drop_tables; info != NULL; info = info->next)
+		foreach(lc, pending_drop_tables)
 		{
-			if (info->is_cascade)
-			{
-				ereport(LOG,
-						(errmsg("DROP TABLE (CASCADE): relation \"%s.%s\" (OID %u), "
-								"drop LSN: %X/%X, commit LSN: %X/%X",
-								info->schemaname,
-								info->relname,
-								info->reloid,
-								LSN_FORMAT_ARGS(info->drop_lsn),
-								LSN_FORMAT_ARGS(commit_lsn))));
-			}
-			else
-			{
-				ereport(LOG,
-						(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), "
-								"drop LSN: %X/%X, commit LSN: %X/%X",
-								info->schemaname,
-								info->relname,
-								info->reloid,
-								LSN_FORMAT_ARGS(info->drop_lsn),
-								LSN_FORMAT_ARGS(commit_lsn))));
-			}
+			DropTableInfo *info = (DropTableInfo *) lfirst(lc);
+
+			ereport(LOG,
+					(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), "
+							"drop LSN: %X/%X, commit LSN: %X/%X",
+							info->schemaname,
+							info->relname,
+							info->reloid,
+							LSN_FORMAT_ARGS(info->drop_lsn),
+							LSN_FORMAT_ARGS(commit_lsn))));
 		}
 	}
 
 	if (event == XACT_EVENT_COMMIT ||
-		event == XACT_EVENT_ABORT ||
-		event == XACT_EVENT_PARALLEL_ABORT)
-	{
-		pending_drop_tables = NULL;
-	}
+        event == XACT_EVENT_ABORT ||
+        event == XACT_EVENT_PARALLEL_ABORT)
+    {
+        list_free_deep(pending_drop_tables);
+		pending_drop_tables = NIL;
+    }
 }
 
 /*
@@ -1461,62 +1441,36 @@ doDeletion(const ObjectAddress *object, int flags)
 
 				/*
 				* Log all table drops that go through this function.
-				* This catches:
-				* - Direct DROP TABLE
-				* - DROP SCHEMA CASCADE
-				* - DROP TABLE parent CASCADE (FK dependencies)
-				* - Any other cascade deletions
 				*/
 				if (relKind == RELKIND_RELATION ||
 					relKind == RELKIND_PARTITIONED_TABLE)
 				{
 					char *relname = get_rel_name(object->objectId);
-					Oid schemaoid = get_rel_namespace(object->objectId);
-					char *schemaname = get_namespace_name(schemaoid);
-					XLogRecPtr lsn = GetXLogInsertRecPtr();
-					bool is_cascade;
+ 					Oid schemaoid = get_rel_namespace(object->objectId);
+ 					char *schemaname = get_namespace_name(schemaoid);
+ 					XLogRecPtr lsn = GetXLogInsertRecPtr();
 
-					/*
-					* Determine if this is a CASCADE drop.
-					* If PERFORM_DELETION_INTERNAL is set, it's part of dependency
-					* resolution (CASCADE). Otherwise, it's a direct DROP.
-					*/
-					is_cascade = (flags & PERFORM_DELETION_INTERNAL) != 0;
+ 					if (relname != NULL)
+ 					{
+ 						if (IsTransactionBlock())
+ 						{
+ 							RegisterDropTable(object->objectId, relname,
+ 											schemaname ? schemaname : "unknown",
+ 											lsn);
+ 						}
+ 						else
+ 						{
+ 							ereport(LOG,
+ 									(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
+ 											schemaname ? schemaname : "unknown",
+ 											relname, object->objectId,
+ 											LSN_FORMAT_ARGS(lsn))));
+ 						}
 
-					if (relname != NULL)
-					{
-						if (IsTransactionBlock())
-						{
-							/* Register for commit-time logging */
-							RegisterDropTable(object->objectId, relname,
-											schemaname ? schemaname : "unknown",
-											lsn, is_cascade);
-						}
-						else
-						{
-							/* Auto-commit - log immediately */
-							if (is_cascade)
-							{
-								ereport(LOG,
-										(errmsg("DROP TABLE (CASCADE): relation \"%s.%s\" (OID %u), LSN: %X/%X",
-												schemaname ? schemaname : "unknown",
-												relname, object->objectId,
-												LSN_FORMAT_ARGS(lsn))));
-							}
-							else
-							{
-								ereport(LOG,
-										(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
-												schemaname ? schemaname : "unknown",
-												relname, object->objectId,
-												LSN_FORMAT_ARGS(lsn))));
-							}
-						}
-
-						pfree(relname);
-						if (schemaname)
-							pfree(schemaname);
-					}
+ 						pfree(relname);
+ 						if (schemaname)
+ 							pfree(schemaname);
+ 					}
 				}
 
 				if (relKind == RELKIND_INDEX ||
