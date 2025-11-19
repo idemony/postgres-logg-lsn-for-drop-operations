@@ -184,6 +184,7 @@ typedef struct DropTableInfo
 	char		relname[NAMEDATALEN];
 	char		schemaname[NAMEDATALEN];
 	XLogRecPtr	drop_lsn;
+	SubTransactionId subxid;
 } DropTableInfo;
 
 /* Per-transaction list of dropped tables */
@@ -191,6 +192,8 @@ static List *pending_drop_tables = NIL;
 static bool drop_table_callback_registered = false;
 
 static void DropTableXactCallback(XactEvent event, void *arg);
+static void DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+									  SubTransactionId parentSubid, void *arg);
 
 /*
  * Register a table drop for logging lsn.
@@ -205,6 +208,7 @@ RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
 	if (!drop_table_callback_registered)
 	{
 		RegisterXactCallback(DropTableXactCallback, NULL);
+		RegisterSubXactCallback(DropTableSubXactCallback, NULL);
 		drop_table_callback_registered = true;
 	}
 
@@ -215,11 +219,56 @@ RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
 	strlcpy(info->relname, relname, NAMEDATALEN);
 	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
 	info->drop_lsn = lsn;
+	info->subxid = GetCurrentSubTransactionId();
 
 	pending_drop_tables = lappend(pending_drop_tables, info);
 
 	MemoryContextSwitchTo(oldcontext);
 }
+
+/*
+ * SubXactCallback - handle ROLLBACK TO SAVEPOINT
+ */
+static void
+DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+						 SubTransactionId parentSubid, void *arg)
+{
+	ListCell *lc;
+	ListCell *next;
+
+	/*
+	 * On subtransaction abort, remove all entries belonging to
+	 * the aborted subtransaction and its children.
+	 */
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+	{
+		List *new_list = NIL;
+
+		foreach(lc, pending_drop_tables)
+		{
+			DropTableInfo *info = (DropTableInfo *) lfirst(lc);
+
+			/*
+			 * Keep entries that belong to parent subtransactions.
+			 * SubTransactionIds are assigned incrementally, so we can
+			 * compare them.
+			 */
+			if (info->subxid < mySubid)
+			{
+				new_list = lappend(new_list, info);
+			}
+			else
+			{
+				/* This entry was rolled back */
+				pfree(info);
+			}
+		}
+
+		list_free(pending_drop_tables);
+		pending_drop_tables = new_list;
+	}
+}
+
 
 /*
  * DropTableXactCallback
