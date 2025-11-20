@@ -7671,6 +7671,62 @@ local0.*    /var/log/postgresql
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-log-drop-lsn" xreflabel="log_drop_lsn">
+      <term><varname>log_drop_lsn</varname> (<type>boolean</type>)
+       <indexterm>
+        <primary><varname>log_drop_lsn</varname> configuration parameter</primary>
+       </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Causes <command>DROP TABLE</command> and <command>DROP DATABASE</command>
+        operations to be logged with their LSN (Log Sequence Number) values.
+        For operations executed within a transaction, both the drop LSN
+        (when the operation was performed) and commit LSN (when the transaction
+        committed) are logged. This is useful for auditing and tracking when
+        tables and databases are removed from the system.
+       </para>
+       <para>
+        The following operations are logged:
+        <itemizedlist>
+         <listitem>
+          <para>
+           Direct <command>DROP TABLE</command> statements
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           Tables dropped via <command>DROP SCHEMA CASCADE</command>
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           Partitioned tables and their partitions
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           Tables with inheritance hierarchies
+          </para>
+         </listitem>
+         <listitem>
+          <para>
+           <command>DROP DATABASE</command> operations
+          </para>
+         </listitem>
+        </itemizedlist>
+       </para>
+       <para>
+        Operations rolled back via <command>ROLLBACK</command> or
+        <command>ROLLBACK TO SAVEPOINT</command> are not logged.
+        Only committed drops appear in the log.
+       </para>
+       <para>
+        The default is <literal>off</literal>. Only superusers and users with
+        the appropriate <literal>SET</literal> privilege can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
 
      <varlistentry id="guc-log-duration" xreflabel="log_duration">
       <term><varname>log_duration</varname> (<type>boolean</type>)

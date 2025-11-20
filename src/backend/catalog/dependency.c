@@ -66,6 +66,7 @@
 #include "catalog/pg_ts_template.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_user_mapping.h"
+#include "utils/guc.h"
 #include "commands/comment.h"
 #include "commands/defrem.h"
 #include "commands/event_trigger.h"
@@ -234,7 +235,7 @@ DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 						 SubTransactionId parentSubid, void *arg)
 {
 	ListCell *lc;
-	ListCell *next;
+	MemoryContext oldcontext;
 
 	/*
 	 * On subtransaction abort, remove all entries belonging to
@@ -243,6 +244,9 @@ DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 	if (event == SUBXACT_EVENT_ABORT_SUB)
 	{
 		List *new_list = NIL;
+
+		/* Switch to TopTransactionContext for the new list */
+		oldcontext = MemoryContextSwitchTo(TopTransactionContext);
 
 		foreach(lc, pending_drop_tables)
 		{
@@ -266,13 +270,13 @@ DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 
 		list_free(pending_drop_tables);
 		pending_drop_tables = new_list;
+
+		MemoryContextSwitchTo(oldcontext);
 	}
 }
 
-
 /*
  * DropTableXactCallback
- *
  * Transaction callback to log commit LSN for DROP TABLE operations.
  */
 static void
@@ -299,13 +303,21 @@ DropTableXactCallback(XactEvent event, void *arg)
 		}
 	}
 
+	/* Clean up after commit or abort */
 	if (event == XACT_EVENT_COMMIT ||
-        event == XACT_EVENT_ABORT ||
-        event == XACT_EVENT_PARALLEL_ABORT)
-    {
-        list_free_deep(pending_drop_tables);
+		event == XACT_EVENT_ABORT ||
+		event == XACT_EVENT_PARALLEL_ABORT)
+	{
+		/* Free the DropTableInfo structures */
+		foreach(lc, pending_drop_tables)
+		{
+			DropTableInfo *info = (DropTableInfo *) lfirst(lc);
+			pfree(info);
+		}
+
+		list_free(pending_drop_tables);
 		pending_drop_tables = NIL;
-    }
+	}
 }
 
 /*
@@ -1491,35 +1503,34 @@ doDeletion(const ObjectAddress *object, int flags)
 				/*
 				* Log all table drops that go through this function.
 				*/
-				if (relKind == RELKIND_RELATION ||
-					relKind == RELKIND_PARTITIONED_TABLE)
+				if (log_drop_lsn)
 				{
-					char *relname = get_rel_name(object->objectId);
- 					Oid schemaoid = get_rel_namespace(object->objectId);
- 					char *schemaname = get_namespace_name(schemaoid);
- 					XLogRecPtr lsn = GetXLogInsertRecPtr();
+					if (relKind == RELKIND_RELATION ||
+						relKind == RELKIND_PARTITIONED_TABLE)
+					{
+						char *relname = get_rel_name(object->objectId);
+						Oid schemaoid = get_rel_namespace(object->objectId);
+						char *schemaname = get_namespace_name(schemaoid);
+						XLogRecPtr lsn = GetXLogInsertRecPtr();
 
- 					if (relname != NULL)
- 					{
- 						if (IsTransactionBlock())
- 						{
- 							RegisterDropTable(object->objectId, relname,
- 											schemaname ? schemaname : "unknown",
- 											lsn);
- 						}
- 						else
- 						{
- 							ereport(LOG,
- 									(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
- 											schemaname ? schemaname : "unknown",
- 											relname, object->objectId,
- 											LSN_FORMAT_ARGS(lsn))));
- 						}
-
- 						pfree(relname);
- 						if (schemaname)
- 							pfree(schemaname);
- 					}
+						if (relname != NULL)
+						{
+							if (IsTransactionBlock())
+							{
+								RegisterDropTable(object->objectId, relname,
+												schemaname ? schemaname : "unknown",
+												lsn);
+							}
+							else
+							{
+								ereport(LOG,
+										(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
+												schemaname ? schemaname : "unknown",
+												relname, object->objectId,
+												LSN_FORMAT_ARGS(lsn))));
+							}
+						}
+					}
 				}
 
 				if (relKind == RELKIND_INDEX ||

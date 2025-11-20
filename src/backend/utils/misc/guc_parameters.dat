@@ -3500,5 +3500,11 @@
   options => 'io_method_options',
   assign_hook => 'assign_io_method',
 },
+{ name => 'log_drop_lsn', type => 'bool', context => 'PGC_SUSET', group => 'LOGGING_WHAT',
+  short_desc => 'Logs LSN for DROP TABLE and DROP DATABASE operations.',
+  long_desc => 'When enabled, the system will log the LSN (Log Sequence Number) whenever a DROP TABLE or DROP DATABASE command is executed.',
+  variable => 'log_drop_lsn',
+  boot_val => 'false',
+},
 
 ]

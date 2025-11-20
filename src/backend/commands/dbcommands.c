@@ -1861,6 +1861,7 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	DropDatabaseBuffers(db_id);
 
 	/* Log LSN after database drop operation completes */
+	if (log_drop_lsn)
 	{
 		XLogRecPtr current_lsn = GetXLogInsertRecPtr();
 		elog(LOG, "DROP DATABASE: database \"%s\", OID %u, LSN: %X/%X",
