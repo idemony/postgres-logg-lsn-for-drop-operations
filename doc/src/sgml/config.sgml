@@ -7722,8 +7722,7 @@ local0.*    /var/log/postgresql
         Only committed drops appear in the log.
        </para>
        <para>
-        The default is <literal>off</literal>. Only superusers and users with
-        the appropriate <literal>SET</literal> privilege can change this setting.
+        The default is <literal>off</literal>. Only superusers can change this setting.
        </para>
       </listitem>
      </varlistentry>

@@ -186,6 +186,7 @@ typedef struct DropTableInfo
 	char		schemaname[NAMEDATALEN];
 	XLogRecPtr	drop_lsn;
 	SubTransactionId subxid;
+	bool valid;
 } DropTableInfo;
 
 /* Per-transaction list of dropped tables */
@@ -221,6 +222,7 @@ RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
 	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
 	info->drop_lsn = lsn;
 	info->subxid = GetCurrentSubTransactionId();
+	info->valid = true;
 
 	pending_drop_tables = lappend(pending_drop_tables, info);
 
@@ -234,6 +236,9 @@ static void
 DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 						 SubTransactionId parentSubid, void *arg)
 {
+	if (pending_drop_tables == NIL)
+        return;
+
 	ListCell *lc;
 	MemoryContext oldcontext;
 
@@ -253,23 +258,15 @@ DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 			DropTableInfo *info = (DropTableInfo *) lfirst(lc);
 
 			/*
-			 * Keep entries that belong to parent subtransactions.
+			 * Mark entries that belong to our subtransactions.
 			 * SubTransactionIds are assigned incrementally, so we can
 			 * compare them.
 			 */
-			if (info->subxid < mySubid)
+			if (info->subxid >= mySubid)
 			{
-				new_list = lappend(new_list, info);
-			}
-			else
-			{
-				/* This entry was rolled back */
-				pfree(info);
+				info->valid = false;
 			}
 		}
-
-		list_free(pending_drop_tables);
-		pending_drop_tables = new_list;
 
 		MemoryContextSwitchTo(oldcontext);
 	}
@@ -282,6 +279,9 @@ DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 static void
 DropTableXactCallback(XactEvent event, void *arg)
 {
+	if (pending_drop_tables == NIL)
+        return;
+
 	ListCell *lc;
 
 	if (event == XACT_EVENT_PRE_COMMIT && pending_drop_tables != NIL)
@@ -291,8 +291,9 @@ DropTableXactCallback(XactEvent event, void *arg)
 		foreach(lc, pending_drop_tables)
 		{
 			DropTableInfo *info = (DropTableInfo *) lfirst(lc);
-
-			ereport(LOG,
+			if (info->valid)
+			{
+				ereport(LOG,
 					(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), "
 							"drop LSN: %X/%X, commit LSN: %X/%X",
 							info->schemaname,
@@ -300,6 +301,7 @@ DropTableXactCallback(XactEvent event, void *arg)
 							info->reloid,
 							LSN_FORMAT_ARGS(info->drop_lsn),
 							LSN_FORMAT_ARGS(commit_lsn))));
+			}
 		}
 	}
 
@@ -1503,33 +1505,35 @@ doDeletion(const ObjectAddress *object, int flags)
 				/*
 				* Log all table drops that go through this function.
 				*/
-				if (log_drop_lsn)
+				if (relKind == RELKIND_RELATION ||
+					relKind == RELKIND_PARTITIONED_TABLE
+					&& log_drop_lsn)
 				{
-					if (relKind == RELKIND_RELATION ||
-						relKind == RELKIND_PARTITIONED_TABLE)
-					{
-						char *relname = get_rel_name(object->objectId);
-						Oid schemaoid = get_rel_namespace(object->objectId);
-						char *schemaname = get_namespace_name(schemaoid);
-						XLogRecPtr lsn = GetXLogInsertRecPtr();
+					char *relname = get_rel_name(object->objectId);
+					Oid schemaoid = get_rel_namespace(object->objectId);
+					char *schemaname = get_namespace_name(schemaoid);
+					XLogRecPtr lsn = GetXLogInsertRecPtr();
 
-						if (relname != NULL)
+					if (relname != NULL)
+					{
+						if (IsTransactionBlock() || GetCurrentTransactionNestLevel() > 1)
 						{
-							if (IsTransactionBlock())
-							{
-								RegisterDropTable(object->objectId, relname,
-												schemaname ? schemaname : "unknown",
-												lsn);
-							}
-							else
-							{
-								ereport(LOG,
-										(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
-												schemaname ? schemaname : "unknown",
-												relname, object->objectId,
-												LSN_FORMAT_ARGS(lsn))));
-							}
+							RegisterDropTable(object->objectId, relname,
+											schemaname ? schemaname : "unknown",
+											lsn);
 						}
+						else
+						{
+							ereport(LOG,
+									(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
+											schemaname ? schemaname : "unknown",
+											relname, object->objectId,
+											LSN_FORMAT_ARGS(lsn))));
+						}
+
+						pfree(relname);
+						if (schemaname)
+							pfree(schemaname);
 					}
 				}
 
