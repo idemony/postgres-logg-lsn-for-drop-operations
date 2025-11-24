@@ -201,8 +201,7 @@ static void DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubi
  * Register a table drop for logging lsn.
  */
 static void
-RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
-				  XLogRecPtr lsn)
+RegisterDropTable(Oid reloid, const char *relname, const char *schemaname)
 {
 	DropTableInfo *info;
 	MemoryContext oldcontext;
@@ -220,7 +219,7 @@ RegisterDropTable(Oid reloid, const char *relname, const char *schemaname,
 	info->reloid = reloid;
 	strlcpy(info->relname, relname, NAMEDATALEN);
 	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
-	info->drop_lsn = lsn;
+	info->drop_lsn = InvalidXLogRecPtr;
 	info->subxid = GetCurrentSubTransactionId();
 	info->valid = true;
 
@@ -236,11 +235,11 @@ static void
 DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 						 SubTransactionId parentSubid, void *arg)
 {
-	if (pending_drop_tables == NIL)
-        return;
-
 	ListCell *lc;
 	MemoryContext oldcontext;
+
+	if (pending_drop_tables == NIL)
+        return;
 
 	/*
 	 * On subtransaction abort, remove all entries belonging to
@@ -279,12 +278,25 @@ DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 static void
 DropTableXactCallback(XactEvent event, void *arg)
 {
+	ListCell *lc;
+
 	if (pending_drop_tables == NIL)
         return;
 
-	ListCell *lc;
+	if (event == XACT_EVENT_PRE_COMMIT)
+	{
+		XLogRecPtr current_lsn = GetXLogInsertRecPtr();
 
-	if (event == XACT_EVENT_PRE_COMMIT && pending_drop_tables != NIL)
+        foreach(lc, pending_drop_tables)
+        {
+            DropTableInfo *info = (DropTableInfo *) lfirst(lc);
+            if (info->valid)
+            {
+                info->drop_lsn = current_lsn;
+            }
+        }
+	}
+	else if (event == XACT_EVENT_COMMIT)
 	{
 		XLogRecPtr commit_lsn = GetXLogInsertRecPtr();
 
@@ -1510,20 +1522,24 @@ doDeletion(const ObjectAddress *object, int flags)
 					&& log_drop_lsn)
 				{
 					char *relname = get_rel_name(object->objectId);
-					Oid schemaoid = get_rel_namespace(object->objectId);
-					char *schemaname = get_namespace_name(schemaoid);
-					XLogRecPtr lsn = GetXLogInsertRecPtr();
 
 					if (relname != NULL)
 					{
+						char *schemaname = NULL;
+						Oid schemaoid = get_rel_namespace(object->objectId);
+						if (OidIsValid(schemaoid))
+						{
+							schemaname = get_namespace_name(schemaoid);
+						}
+
 						if (IsTransactionBlock() || GetCurrentTransactionNestLevel() > 1)
 						{
 							RegisterDropTable(object->objectId, relname,
-											schemaname ? schemaname : "unknown",
-											lsn);
+											schemaname ? schemaname : "unknown");
 						}
 						else
 						{
+							XLogRecPtr lsn = GetXLogInsertRecPtr();
 							ereport(LOG,
 									(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
 											schemaname ? schemaname : "unknown",

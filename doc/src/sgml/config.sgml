@@ -7673,59 +7673,37 @@ local0.*    /var/log/postgresql
 
      <varlistentry id="guc-log-drop-lsn" xreflabel="log_drop_lsn">
       <term><varname>log_drop_lsn</varname> (<type>boolean</type>)
-       <indexterm>
+      <indexterm>
         <primary><varname>log_drop_lsn</varname> configuration parameter</primary>
-       </indexterm>
+      </indexterm>
       </term>
       <listitem>
-       <para>
+      <para>
         Causes <command>DROP TABLE</command> and <command>DROP DATABASE</command>
         operations to be logged with their LSN (Log Sequence Number) values.
-        For operations executed within a transaction, both the drop LSN
-        (when the operation was performed) and commit LSN (when the transaction
-        committed) are logged. This is useful for auditing and tracking when
-        tables and databases are removed from the system.
-       </para>
-       <para>
-        The following operations are logged:
-        <itemizedlist>
-         <listitem>
-          <para>
-           Direct <command>DROP TABLE</command> statements
-          </para>
-         </listitem>
-         <listitem>
-          <para>
-           Tables dropped via <command>DROP SCHEMA CASCADE</command>
-          </para>
-         </listitem>
-         <listitem>
-          <para>
-           Partitioned tables and their partitions
-          </para>
-         </listitem>
-         <listitem>
-          <para>
-           Tables with inheritance hierarchies
-          </para>
-         </listitem>
-         <listitem>
-          <para>
-           <command>DROP DATABASE</command> operations
-          </para>
-         </listitem>
-        </itemizedlist>
-       </para>
-       <para>
-        Operations rolled back via <command>ROLLBACK</command> or
-        <command>ROLLBACK TO SAVEPOINT</command> are not logged.
-        Only committed drops appear in the log.
-       </para>
-       <para>
+      </para>
+
+      <para>
+        When <command>DROP TABLE</command> is executed within a transaction block
+        (e.g., between <command>BEGIN</command> and <command>COMMIT</command>),
+        the log entry includes both the drop LSN and the commit LSN. Otherwise,
+        only a single LSN is logged. <command>DROP DATABASE</command> operations
+        cannot be executed in a transaction block, so they always log a single LSN.
+      </para>
+
+      <para>
+        Logged operations include: direct <command>DROP TABLE</command>,
+        tables dropped via <command>DROP SCHEMA CASCADE</command>,
+        partitioned tables and their partitions, tables in inheritance hierarchies,
+        and <command>DROP DATABASE</command> commands.
+        Operations that are rolled back are not logged.
+      </para>
+
+      <para>
         The default is <literal>off</literal>. Only superusers can change this setting.
-       </para>
+      </para>
       </listitem>
-     </varlistentry>
+    </varlistentry>
 
      <varlistentry id="guc-log-duration" xreflabel="log_duration">
       <term><varname>log_duration</varname> (<type>boolean</type>)
