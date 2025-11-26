@@ -193,7 +193,7 @@ typedef struct DropTableInfo
 static List *pending_drop_tables = NIL;
 static bool drop_table_callback_registered = false;
 
-static void DropTableXactCallback(XactEvent event, void *arg);
+static void DropTableXactCallback(XactEvent event, void *arg, XLogRecPtr lsn);
 static void DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 									  SubTransactionId parentSubid, void *arg);
 
@@ -276,7 +276,7 @@ DropTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
  * Transaction callback to log commit LSN for DROP TABLE operations.
  */
 static void
-DropTableXactCallback(XactEvent event, void *arg)
+DropTableXactCallback(XactEvent event, void *arg, XLogRecPtr commit_lsn)
 {
 	ListCell *lc;
 
@@ -298,8 +298,6 @@ DropTableXactCallback(XactEvent event, void *arg)
 	}
 	else if (event == XACT_EVENT_COMMIT)
 	{
-		XLogRecPtr commit_lsn = GetXLogInsertRecPtr();
-
 		foreach(lc, pending_drop_tables)
 		{
 			DropTableInfo *info = (DropTableInfo *) lfirst(lc);
