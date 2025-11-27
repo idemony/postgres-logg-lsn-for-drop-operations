@@ -1315,7 +1315,7 @@ static TransactionId
 RecordTransactionCommit(XLogRecPtr *commit_lsn_out)
 {
 	TransactionId xid = GetTopTransactionIdIfAny();
-    XLogRecPtr commit_lsn = InvalidXLogRecPtr;
+	XLogRecPtr commit_lsn = InvalidXLogRecPtr;
 	bool		markXidCommitted = TransactionIdIsValid(xid);
 	TransactionId latestXid = InvalidTransactionId;
 	int			nrels;
@@ -1582,7 +1582,7 @@ cleanup:
 		pfree(droppedstats);
 
 	if (commit_lsn_out)
-        *commit_lsn_out = commit_lsn;
+		*commit_lsn_out = commit_lsn;
 
 	return latestXid;
 }

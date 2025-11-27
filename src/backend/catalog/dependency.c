@@ -184,7 +184,6 @@ typedef struct DropTableInfo
 	Oid			reloid;
 	char		relname[NAMEDATALEN];
 	char		schemaname[NAMEDATALEN];
-	XLogRecPtr	drop_lsn;
 	SubTransactionId subxid;
 	bool valid;
 } DropTableInfo;
@@ -219,7 +218,6 @@ RegisterDropTable(Oid reloid, const char *relname, const char *schemaname)
 	info->reloid = reloid;
 	strlcpy(info->relname, relname, NAMEDATALEN);
 	strlcpy(info->schemaname, schemaname, NAMEDATALEN);
-	info->drop_lsn = InvalidXLogRecPtr;
 	info->subxid = GetCurrentSubTransactionId();
 	info->valid = true;
 
@@ -283,33 +281,21 @@ DropTableXactCallback(XactEvent event, void *arg, XLogRecPtr commit_lsn)
 	if (pending_drop_tables == NIL)
         return;
 
-	if (event == XACT_EVENT_PRE_COMMIT)
-	{
-		XLogRecPtr current_lsn = GetXLogInsertRecPtr();
-
-        foreach(lc, pending_drop_tables)
-        {
-            DropTableInfo *info = (DropTableInfo *) lfirst(lc);
-            if (info->valid)
-            {
-                info->drop_lsn = current_lsn;
-            }
-        }
-	}
-	else if (event == XACT_EVENT_COMMIT)
+	if (event == XACT_EVENT_COMMIT)
 	{
 		foreach(lc, pending_drop_tables)
 		{
 			DropTableInfo *info = (DropTableInfo *) lfirst(lc);
 			if (info->valid)
 			{
+				Assert(!XLogRecPtrIsInvalid(commit_lsn));
+
 				ereport(LOG,
 					(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), "
 							"drop LSN: %X/%X, commit LSN: %X/%X",
 							info->schemaname,
 							info->relname,
 							info->reloid,
-							LSN_FORMAT_ARGS(info->drop_lsn),
 							LSN_FORMAT_ARGS(commit_lsn))));
 			}
 		}
@@ -1530,20 +1516,7 @@ doDeletion(const ObjectAddress *object, int flags)
 							schemaname = get_namespace_name(schemaoid);
 						}
 
-						if (IsTransactionBlock() || GetCurrentTransactionNestLevel() > 1)
-						{
-							RegisterDropTable(object->objectId, relname,
-											schemaname ? schemaname : "unknown");
-						}
-						else
-						{
-							XLogRecPtr lsn = GetXLogInsertRecPtr();
-							ereport(LOG,
-									(errmsg("DROP TABLE: relation \"%s.%s\" (OID %u), LSN: %X/%X",
-											schemaname ? schemaname : "unknown",
-											relname, object->objectId,
-											LSN_FORMAT_ARGS(lsn))));
-						}
+						RegisterDropTable(object->objectId, relname, schemaname ? schemaname : "unknown");
 
 						pfree(relname);
 						if (schemaname)
