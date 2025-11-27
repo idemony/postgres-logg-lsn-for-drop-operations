@@ -1517,7 +1517,7 @@ doDeletion(const ObjectAddress *object, int flags)
 				*/
 				if ((relKind == RELKIND_RELATION ||
 					relKind == RELKIND_PARTITIONED_TABLE)
-					&& log_drop_lsn)
+					&& log_object_drops)
 				{
 					char *relname = get_rel_name(object->objectId);
 

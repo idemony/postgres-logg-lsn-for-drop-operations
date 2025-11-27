@@ -1849,7 +1849,7 @@ dropdb(const char *dbname, bool missing_ok, bool force)
 	heap_freetuple(tup);
 
 	/* Log LSN after database drop operation completes */
-	if (log_drop_lsn)
+	if (log_object_drops)
 	{
 		XLogRecPtr current_lsn = GetXLogInsertRecPtr();
 		ereport(LOG,

@@ -7671,10 +7671,10 @@ local0.*    /var/log/postgresql
       </listitem>
      </varlistentry>
 
-     <varlistentry id="guc-log-drop-lsn" xreflabel="log_drop_lsn">
-      <term><varname>log_drop_lsn</varname> (<type>boolean</type>)
+     <varlistentry id="guc-log_object_drops" xreflabel="log_object_drops">
+      <term><varname>log_object_drops</varname> (<type>boolean</type>)
       <indexterm>
-        <primary><varname>log_drop_lsn</varname> configuration parameter</primary>
+        <primary><varname>log_object_drops</varname> configuration parameter</primary>
       </indexterm>
       </term>
       <listitem>
